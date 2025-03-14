@@ -1,66 +1,53 @@
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-import os
+import io
 import torch
-from datetime import datetime
-from werkzeug.utils import secure_filename
-
-app = Flask(__name__)
-CORS(app)
+import numpy as np
+import cv2
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from ultralytics import YOLO
+from PIL import Image
+import base64
 
 # Load YOLOv5 model
-try:
-    model = torch.hub.load("ultralytics/yolov5", "yolov5s", pretrained=True)
-except Exception as e:
-    print("Error loading YOLO model:", e)
-    exit(1)
+model = YOLO("yolov5s.pt")  # Ensure yolov5s.pt is in the main directory
 
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app = FastAPI()
 
-@app.route("/upload", methods=["POST"])
-def upload_image():
+# Enable CORS for all domains (so external webpages can access the API)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Change this to your frontend URL for security
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/predict/")
+async def predict(file: UploadFile = File(...)):
+    """Receives an image, processes it with YOLOv5, and returns the labeled image"""
     try:
-        if "image" not in request.files:
-            return jsonify({"error": "No image file found"}), 400
+        # Read image
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        img_np = np.array(image)
 
-        file = request.files["image"]
-        if file.filename == "":
-            return jsonify({"error": "No selected file"}), 400
+        # Run YOLO model
+        results = model(img_np)
 
-        # Create a unique folder for each upload
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        folder_name = os.path.join(UPLOAD_FOLDER, f"upload_{timestamp}")
-        os.makedirs(folder_name, exist_ok=True)
+        # Draw bounding boxes on image
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                label = f"{model.names[int(box.cls[0])]} {box.conf[0]:.2f}"
+                cv2.rectangle(img_np, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(img_np, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-        # Save uploaded image
-        filename = secure_filename(file.filename)
-        image_path = os.path.join(folder_name, filename)
-        file.save(image_path)
+        # Convert back to image and encode in Base64
+        _, img_encoded = cv2.imencode(".jpg", img_np)
+        img_base64 = base64.b64encode(img_encoded).decode("utf-8")
 
-        # Process image with YOLOv5
-        results = model(image_path)
-
-        # Save processed image in the same folder (NO "exp" folder)
-        processed_filename = f"processed_{timestamp}.jpg"
-        processed_image_path = os.path.join(folder_name, processed_filename)
-        results.render()
-        for img in results.ims:
-            import cv2
-            cv2.imwrite(processed_image_path, img)
-
-        if not os.path.exists(processed_image_path):
-            return jsonify({"error": "Processed image not found"}), 500
-
-        return jsonify({"processed_image": f"/processed/{folder_name}/{processed_filename}"}), 200
+        return JSONResponse(content={"message": "Success", "image": img_base64})
 
     except Exception as e:
-        print("Error in upload_image:", e)
-        return jsonify({"error": "Internal server error"}), 500
-
-@app.route("/processed/uploads/<path:filename>")
-def get_processed_image(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
-if __name__ == "__main__":
-    app.run(debug=True)
+        return JSONResponse(content={"error": str(e)}, status_code=500)
