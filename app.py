@@ -10,7 +10,7 @@ from PIL import Image
 import base64
 
 # Load YOLOv5 model
-model = YOLO("yolov5s.pt")  # Ensure yolov5s.pt is in the main directory
+model = YOLO("yolov5su.pt")  # Ensure yolov5s.pt is in the main directory
 
 app = FastAPI()
 
